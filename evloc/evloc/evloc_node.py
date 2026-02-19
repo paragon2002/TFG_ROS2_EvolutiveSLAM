@@ -22,31 +22,34 @@ from evloc.common_classes import spatial_rotation
 import time
 
 def configure_environment():
+    
+    env_paths = {
+        1: 'real',
+        2: 'simulation'
+    }
     # Preguntar si es online
     online_input = input("\nWork in online mode? (y/n): ")
 
     if online_input.lower() == 'y':
         online = True
+        environment_type = 2
     else:
         online = False
 
-    # Preguntar tipo de environment
-    print("\nSelect Environment:")
-    print(" 1) Real Environment (Default)")
-    print(" 2) Simulation Dataset")
+        # Preguntar tipo de environment
+        print("\nSelect Environment:")
+        print(" 1) Real Environment (Default)")
+        print(" 2) Simulation Dataset")
 
-    environment_type = input()
+        environment_type = input()
 
-    if not environment_type.strip():
-        environment_type = 1
-        print('\t Option 1 (Real) by default.')
-    else:
-        environment_type = int(environment_type)
+        if not environment_type.strip():
+            environment_type = 1
+            print('\t Option 1 (Real) by default.')
+        else:
+            environment_type = int(environment_type)
 
-    env_paths = {
-        1: 'real',
-        2: 'simulation'
-    }
+
 
     BASE_PACKAGE_PATH = os.path.join(get_package_share_directory('evloc'))
 
@@ -176,6 +179,8 @@ class PCD(Node):
 
         self.pcd_publisher_local = self.create_publisher(sensor_msgs.PointCloud2, 'evloc_local', 10)
         self.pcd_publisher_global = self.create_publisher(sensor_msgs.PointCloud2, 'evloc_global', 10)
+        self.pcd_publisher_real = self.create_publisher(sensor_msgs.PointCloud2, 'evloc_realpose', 10)
+
         self.cloud_points = None
         self.groundtruth = np.full(6, np.inf)
 
@@ -215,8 +220,8 @@ class PCD(Node):
                 print("Waiting for local scan...")
                 rclpy.spin_once(self)
             
-            map_global_unfiltered = o3d.io.read_point_cloud(f"{PACKAGE_PATH}/map_global.pcd")
-            map_global = filter_map_height(map_global_unfiltered, 0, 1.35)
+            map_global_unfiltered = o3d.io.read_point_cloud(f"{self.PACKAGE_PATH}/map_global.pcd")
+            self.map_global = filter_map_height(map_global_unfiltered, 0, 1.35)
             global_downsample = 1
 
         else:
@@ -238,7 +243,7 @@ class PCD(Node):
         LOCAL_CLOUDS_FOLDER = os.path.join(self.PACKAGE_PATH, "local_clouds")
         if self.auto_mode:
             
-            id_cloud, err_dis, unif_noise, algorithm_type, version_fitness, user_NPini, user_iter_max, MAX_CLOUD_ID = ask_params(local_clouds_folder=LOCAL_CLOUDS_FOLDER)
+            id_cloud, err_dis, unif_noise, algorithm_type, version_fitness, user_NPini, user_iter_max, MAX_CLOUD_ID = ask_params(local_clouds_folder=LOCAL_CLOUDS_FOLDER,online=self.online)
             
             
         while True:
@@ -248,7 +253,7 @@ class PCD(Node):
             # Ask every iteration if not in auto mode.
             if not self.auto_mode:
                
-               id_cloud, err_dis, unif_noise, algorithm_type, version_fitness, user_NPini, user_iter_max, MAX_CLOUD_ID  = ask_params(local_clouds_folder=LOCAL_CLOUDS_FOLDER)
+               id_cloud, err_dis, unif_noise, algorithm_type, version_fitness, user_NPini, user_iter_max, MAX_CLOUD_ID  = ask_params(local_clouds_folder=LOCAL_CLOUDS_FOLDER,online=self.online)
 
             map_local = None
             real_groundtruth = None
@@ -267,6 +272,9 @@ class PCD(Node):
                 map_local_unfiltered = o3d.geometry.PointCloud()
                 map_local_unfiltered.points = o3d.utility.Vector3dVector(point_list)
                 map_local = filter_map_height(map_local_unfiltered, 0, 1.35)
+                points_show = spatial_rotation(map_local.points, real_groundtruth)
+                pcd = self.point_cloud(points_show, fixed_frame)
+                self.pcd_publisher_real.publish(pcd)
 
             else:
                 real_scan_ori = o3d.io.read_point_cloud(f"{LOCAL_CLOUDS_FOLDER}/cloud_{id_cloud}.ply")

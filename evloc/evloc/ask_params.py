@@ -12,7 +12,7 @@ from math import pi
 from evloc.common_classes import Color
 from evloc.evloc_constants import *
 
-def ask_params(local_clouds_folder=None):
+def ask_params(local_clouds_folder=None,online=False):
     """
     Asks the user for the desired algorithm parameters and returns them.
     local cloud ID,
@@ -24,25 +24,26 @@ def ask_params(local_clouds_folder=None):
     """
     
     id_cloud = None
+    num_clouds=None
+    if not online:
+        # Local Cloud
+        num_clouds = len(os.listdir(local_clouds_folder))
 
-    # Local Cloud
-    num_clouds = len(os.listdir(local_clouds_folder))
+        print(Color.BOLD + f'\nAvailable scans [1-{num_clouds}]' + Color.END)
+        id_cloud = input(Color.BOLD + "Select cloud as real scan: " + Color.END)
+        if not id_cloud.strip():
+            id_cloud = 9
+            print(f'Default selected cloud: {id_cloud}')
+        try:
+            if int(id_cloud) > num_clouds or int(id_cloud) < 1:
+                print(f'Error. Selected cloud ({id_cloud}) does not exist.') 
+                exit(1)
 
-    print(Color.BOLD + f'\nAvailable scans [1-{num_clouds}]' + Color.END)
-    id_cloud = input(Color.BOLD + "Select cloud as real scan: " + Color.END)
-    if not id_cloud.strip():
-        id_cloud = 9
-        print(f'Default selected cloud: {id_cloud}')
-    try:
-        if int(id_cloud) > num_clouds or int(id_cloud) < 1:
-            print(f'Error. Selected cloud ({id_cloud}) does not exist.') 
+        except ValueError as e:
+            print(f'Error: Invalid Number. {e}')
             exit(1)
 
-    except ValueError as e:
-        print(f'Error: Invalid Number. {e}')
-        exit(1)
-
-        id_cloud = int(id_cloud)
+            id_cloud = int(id_cloud)
 
     # Simulated laser error
     err_dis = input(Color.BOLD + "\nSensor noise (%): " + Color.END)
