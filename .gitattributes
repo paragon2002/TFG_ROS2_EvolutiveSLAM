@@ -1,0 +1,2 @@
+evloc/resources/real/map_global_ori.ply filter=lfs diff=lfs merge=lfs -text
+evloc/resources/real/map_global_ori.rar filter=lfs diff=lfs merge=lfs -text
