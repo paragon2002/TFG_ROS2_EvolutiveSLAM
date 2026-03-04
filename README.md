@@ -22,7 +22,7 @@ This project implements evolutive localization in ROS2.
     ```bash
     source install/setup.bash
     ```
-    You can copy this instruction by editing .bashrc so it is executed when opening a new terminal
+    You can edit .bashrc file and copy this instruction at the end so it is executed when opening a new terminal
 6. Run the node:
 
     ```bash
