@@ -22,7 +22,7 @@ This project implements evolutive localization in ROS2.
     ```bash
     source install/setup.bash
     ```
-
+    You can copy this instruction by editing .bashrc so it is executed when opening a new terminal
 6. Run the node:
 
     ```bash
@@ -41,8 +41,8 @@ Data will be saved in an `errordata.csv` file in your HOME directory. You can ru
 You can run `convergences.py` to see how many times each point cloud converges (Be sure to have the `errordata.csv` file in your HOME directory).
 
 
-### Run in Simulation
-To run the evloc node in simulation, you'll first need to map the environment using the SLAM repository and save the global map. Then, you can utilize the evloc node to match the current local scan of the robot with the saved global scan.
+### Run in Online Simulation
+To run the evloc node in simulation, you'll first need to map the environment using the SLAM repository and save the global map. Then, you can utilize the evloc node to match the current local scan of the robot with the saved global scan. To do so, when launched you need to select online mode.
 - **Repository:** [Multi-turtlebot3-Gazebo-ROS2](https://github.com/Taeyoung96/Multi-turtlebot3-Gazebo-ROS2)
   - **IMPORTANT:** This repository operates using a Docker container in which you log in as the user 'root' (UID = 0). When launching the SLAM or the evloc node, ensure that you are logged in as the 'root' user. You can switch to this 'root' user with UID 0 using the following command: `su root`. If the user inside the container and the user outside the container have different UIDs, you won't be able to subscribe to the topics (even if you can see them when running `ros2 topic list`).
   - Add `--volume=/dev/shm:/dev/shm` to the docker run command.
