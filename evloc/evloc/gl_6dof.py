@@ -8,26 +8,26 @@ from evloc.de_6dof import de_6dof
 from evloc.pso_6dof import pso_6dof
 from evloc.iwo_6dof import iwo_6dof
 
-def gl_6dof(map_global, scancloud, groundtruth, algorithm, version_fitness, err_dis,unif_noise):
+# --- CAMBIO 1: Añadido use_odometry a los parámetros de entrada ---
+def gl_6dof(map_global, scancloud, groundtruth, algorithm, version_fitness, err_dis, unif_noise, mapmax=None, mapmin=None, use_odometry=False):
     """
     Global Localization Algorithm based on evolutonary metaheuristics
-
-    Definimos los límites de búsqueda para cada grado de libertad, limites del
-    mapa en traslación +- 6 grados para pitch y roll y 360º para yaw
-
-    Get the axis-aligned bounding box
     """
 
-    aabb = map_global.get_axis_aligned_bounding_box()
+    if mapmax is None or mapmin is None:
+        print(Color.CYAN + "\n[INFO] Realizando búsqueda GLOBAL (sin límites de odometría)..." + Color.END)
+        aabb = map_global.get_axis_aligned_bounding_box()
 
-    min_bound = aabb.get_min_bound()
-    max_bound = aabb.get_max_bound()
+        min_bound = aabb.get_min_bound()
+        max_bound = aabb.get_max_bound()
 
-    x_min, y_min, z_min = min_bound
-    x_max, y_max, z_max = max_bound
+        x_min, y_min, z_min = min_bound
+        x_max, y_max, z_max = max_bound
 
-    mapmin=[x_min, y_min, z_min, -0.1, -0.1,-pi]
-    mapmax=[x_max, y_max, z_max, 0.1, 0.1, pi]
+        mapmin=[x_min, y_min, z_min, -0.1, -0.1, -pi]
+        mapmax=[x_max, y_max, z_max, 0.1, 0.1, pi]
+    else:
+        print(Color.CYAN + "\n[INFO] Búsqueda ACOTADA (usando datos de las ruedas)..." + Color.END)
 
     real_scan = add_noise_to_pc(scancloud, err_dis, unif_noise) # Add enviroment and sensor noises to scan
 
@@ -47,7 +47,8 @@ def gl_6dof(map_global, scancloud, groundtruth, algorithm, version_fitness, err_
         D=algorithm.D
         F=algorithm.F
         CR=algorithm.CR
-        [pcAligned, allEstimates, bestCost, rmse_array, it, stop_condition] = de_6dof(real_scan, map_global,mapmax,mapmin,err_dis,NPini,D,iter_max,F,CR,version_fitness)
+        # --- CAMBIO 2: Pasamos use_odometry al algoritmo de Evolución Diferencial ---
+        [pcAligned, allEstimates, bestCost, rmse_array, it, stop_condition] = de_6dof(real_scan, map_global,mapmax,mapmin,err_dis,NPini,D,iter_max,F,CR,version_fitness, use_odometry=use_odometry)
 
     elif (algorithm.type == 2): # PSO
         NPini=algorithm.NPini

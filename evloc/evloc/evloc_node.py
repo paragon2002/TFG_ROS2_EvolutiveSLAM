@@ -1,435 +1,175 @@
 import rclpy 
 from rclpy.node import Node
-import sensor_msgs.msg as sensor_msgs
-import nav_msgs.msg as nav_msgs
-import std_msgs.msg as std_msgs
 import numpy as np
 import open3d as o3d
 import csv
 import os
 import math
-
+import copy
 import warnings
-
 from ament_index_python.packages import get_package_share_directory
-
-from evloc.read_points import read_points
 from evloc.common_classes import Color
 from evloc.generate_point_cloud import generate_point_cloud
 from evloc.ask_params import ask_params
 
-from evloc.common_classes import spatial_rotation
-import time
+warnings.filterwarnings("ignore")
 
 def configure_environment():
-    
-    env_paths = {
-        1: 'real',
-        2: 'simulation'
-    }
-    # Preguntar si es online
-    online_input = input("\nWork in online mode? (y/n): ")
+    return {"online": False, "environment_type": 2, "package_path": os.path.join(get_package_share_directory('evloc'), 'resources', 'simulation')}
 
-    if online_input.lower() == 'y':
-        online = True
-        environment_type = 2
+def quat_to_euler(qx, qy, qz, qw):
+    roll = math.atan2(2 * (qw * qx + qy * qz), 1 - 2 * (qx**2 + qy**2))
+    sinp = 2 * (qw * qy - qz * qx)
+    pitch = math.copysign(math.pi / 2, sinp) if abs(sinp) >= 1 else math.asin(sinp)
+    yaw = math.atan2(2 * (qw * qz + qx * qy), 1 - 2 * (qy**2 + qz**2))
+    return [roll, pitch, yaw]
+
+def create_transform(x, y, z, roll, pitch, yaw):
+    cx, sx = math.cos(roll), math.sin(roll)
+    cy, sy = math.cos(pitch), math.sin(pitch)
+    cz, sz = math.cos(yaw), math.sin(yaw)
+    Rx = np.array([[1, 0, 0], [0, cx, -sx], [0, sx, cx]])
+    Ry = np.array([[cy, 0, sy], [0, 1, 0], [-sy, 0, cy]])
+    Rz = np.array([[cz, -sz, 0], [sz, cz, 0], [0, 0, 1]])
+    T = np.eye(4)
+    T[:3, :3] = Rz @ Ry @ Rx
+    T[0, 3] = x; T[1, 3] = y; T[2, 3] = z
+    return T
+
+def get_relative_jump(odom_prev, odom_act):
+    T_prev = create_transform(*odom_prev)
+    T_act = create_transform(*odom_act)
+    T_rel = np.linalg.inv(T_prev) @ T_act
+    x = T_rel[0, 3]
+    y = T_rel[1, 3]
+    z = T_rel[2, 3]
+    sy = math.sqrt(T_rel[0,0]**2 + T_rel[1,0]**2)
+    if sy > 1e-6:
+        roll = math.atan2(T_rel[2,1], T_rel[2,2])
+        pitch = math.atan2(-T_rel[2,0], sy)
+        yaw = math.atan2(T_rel[1,0], T_rel[0,0])
     else:
-        online = False
-
-        # Preguntar tipo de environment
-        print("\nSelect Environment:")
-        print(" 1) Real Environment (Default)")
-        print(" 2) Simulation Dataset")
-
-        environment_type = input()
-
-        if not environment_type.strip():
-            environment_type = 1
-            print('\t Option 1 (Real) by default.')
-        else:
-            environment_type = int(environment_type)
-
-
-
-    BASE_PACKAGE_PATH = os.path.join(get_package_share_directory('evloc'))
-
-    PACKAGE_PATH = os.path.join(
-        BASE_PACKAGE_PATH,
-        'resources',
-        env_paths[environment_type]
-    )
-
-    config = {
-        "online": online,
-        "environment_type": environment_type,
-        "package_path": PACKAGE_PATH
-    }
-
-    return config
-
-# Filter out the RuntimeWarning for invalid value encountered in divide
-# For when NaN is calculated in add_noise_to_pc.
-warnings.filterwarnings("ignore", category=RuntimeWarning, message="invalid value encountered in divide")
-
-##############################################################
-
-def get_groundtruth_data(GROUNDTRUTH_FILE_PATH, id_cloud):
-    """
-    Reads the row "id_cloud" from the GROUNDTRUTH_FILE_PATH and returns it.
-    """
-    try:
-        with open(GROUNDTRUTH_FILE_PATH, 'r') as file:
-            csv_reader = csv.reader(file)
-            
-            for _ in range(int(id_cloud)):
-                next(csv_reader)
-            
-            groundtruth_str = next(csv_reader)
-            groundtruth = np.array(groundtruth_str, dtype=float)
-
-            return groundtruth
-        
-    except FileNotFoundError:
-        print("El archivo CSV no fue encontrado.")
-    except StopIteration:
-        print("La fila especificada excede el número de filas en el archivo CSV.")
-
-def filter_map_height(map, z_min, z_max):
-
-    # Create a crop box to keep only the points between z_min and z_max
-    crop_box = o3d.geometry.AxisAlignedBoundingBox(
-        min_bound=(-float('inf'), -float('inf'), z_min),
-        max_bound=(float('inf'), float('inf'), z_max)
-    )
-
-    # Apply the crop to the point cloud
-    filtered_map = map.crop(crop_box)
-
-    return filtered_map
-
-############################################################
-########################## MAIN ############################
-############################################################
+        roll = math.atan2(-T_rel[1,2], T_rel[1,1])
+        pitch = math.atan2(-T_rel[2,0], sy)
+        yaw = 0
+    return np.array([x, y, z, roll, pitch, yaw])
 
 class PCD(Node):
-
     def __init__(self,config):
         super().__init__('pcd_node')
+        # --- CAMBIO APLICADO AQUÍ ---
+        self.DATASET_FOLDER = os.path.join(os.path.expanduser('~'), 'ros2_ws', 'src', 'ROS2_Evolutive_Localization', 'tools', 'dataset_eficiente')
+        self.GROUNDTRUTH_FILE_PATH= os.path.join(self.DATASET_FOLDER, 'odometria.csv')
+        self.mapa_completo = o3d.geometry.PointCloud()
+        self.matriz_global = np.eye(4)
         
-        # Declara el parámetro mi_parametro con un valor predeterminado
-        self.declare_parameter('auto', False)
-        self.online = config["online"]
-        self.environment_type = config["environment_type"]
-        self.PACKAGE_PATH = config["package_path"]
-        self.declare_parameter('animation', False)
-
-        auto_color = Color.RED
-        online_color = Color.RED
-        animation_color = Color.RED
-
-        self.auto_mode = self.get_parameter('auto').value
-        # self.online = self.get_parameter('online').value
-        self.animation = self.get_parameter('animation').value
-
-        if self.auto_mode:
-            auto_color = Color.GREEN
-
-        if self.online:
-            online_color = Color.GREEN
-
-        if self.animation:
-            animation_color = Color.GREEN
-
-        print(auto_color + f"\nAuto Mode: {self.auto_mode}" + Color.END)
-        print(online_color + f"online: {self.online}" + Color.END)
-        print(animation_color + f"Animation: {self.animation}" + Color.END)
-
-        # Configuración según environment_type
-        if self.environment_type == 1:
-            self.DOWN_SAMPLING_FACTOR_GLOBAL = 250
-            self.DOWN_SAMPLING_FACTOR = 100 # 0.01
-            self.global_downsample_show = 1
-            self.map_global_ori= o3d.io.read_point_cloud(
-                f"{self.PACKAGE_PATH}/map_global_ori.ply"
-            )
-        elif self.environment_type == 2:
-            self.DOWN_SAMPLING_FACTOR_GLOBAL = 1 #320
-            self.DOWN_SAMPLING_FACTOR = 1
-            self.global_downsample_show = 1
-            self.map_global_ori = o3d.io.read_point_cloud(
-                f"{self.PACKAGE_PATH}/map_global.pcd"
-            )
-            self.map_global_ori = filter_map_height(self.map_global_ori, 0, 1.35)
-
-        self.GROUNDTRUTH_FILE_PATH= f"{self.PACKAGE_PATH}/groundtruth_data.csv"
-
-        self.pcd_subscriber = self.create_subscription(
-            sensor_msgs.PointCloud2,
-            '/velodyne_points',
-            self.listener_callback,
-            10  # el número de mensajes en la cola
-        )
-
-        self.odom_subscriber = self.create_subscription(
-            nav_msgs.Odometry,
-            '/odom',
-            self.odom_callback,
-            10  # el número de mensajes en la cola
-        )
-
-        self.pcd_publisher_local = self.create_publisher(sensor_msgs.PointCloud2, 'evloc_local', 10)
-        self.pcd_publisher_global = self.create_publisher(sensor_msgs.PointCloud2, 'evloc_global', 10)
-        self.pcd_publisher_real = self.create_publisher(sensor_msgs.PointCloud2, 'evloc_realpose', 10)
-
-        self.cloud_points = None
-        self.groundtruth = np.full(6, np.inf)
-
-
-    def listener_callback(self, msg):
-        self.cloud_points = msg
-
-    def odom_callback(self, msg):
-        self.groundtruth = msg.pose.pose
-
-        # Extraer los valores de posición (X, Y, Z)
-        x = self.groundtruth.position.x
-        y = self.groundtruth.position.y
-        z = self.groundtruth.position.z
-
-        # Extraer los valores de orientación en cuaternión (qx, qy, qz, qw)
-        qx = self.groundtruth.orientation.x
-        qy = self.groundtruth.orientation.y
-        qz = self.groundtruth.orientation.z
-        qw = self.groundtruth.orientation.w
-
-        # Convertir los cuaterniones a ángulos de Euler (A, B, C)
-        # Asegúrate de que los ángulos estén en el rango adecuado (por ejemplo, -pi a pi)
-        roll = math.atan2(2 * (qw * qx + qy * qz), 1 - 2 * (qx**2 + qy**2))
-        pitch = math.asin(2 * (qw * qy - qz * qx))
-        yaw = math.atan2(2 * (qw * qz + qx * qy), 1 - 2 * (qy**2 + qz**2))
-
-        self.groundtruth = np.array([x, y, z, roll, pitch, yaw])
+        # =================================================================
+        # PANEL DE CONTROL PARA LAS PRUEBAS DEL TFG
+        # =================================================================
+        self.MODO_HIBRIDO = False       # False = SLAM Puro (a ciegas) | True = SLAM Híbrido (usa odometría)
+        self.INYECTAR_RUIDO = False    # True = Mete un error artificial a la odometría para probar su robustez
+        self.VOXEL_SIZE_LOCAL = 0.10   # 0.10 = Reduce puntos cada 10cm. (Pon 0.0 si no quieres reducir la nube)
+        # =================================================================
 
     def run(self):
+        start_cloud, err_dis, unif_noise, alg_type, fit_ver, np_ini, iter_max, MAX_CLOUD_ID = ask_params(local_clouds_folder=self.DATASET_FOLDER, online=False)
 
-        fixed_frame = 'base_footprint'
-
-        if (self.online):
-            rclpy.spin_once(self) # Read once from subscribed topics
-            while (self.cloud_points == None or np.all(np.isinf(self.groundtruth))):
-                print("Waiting for local scan...")
-                rclpy.spin_once(self)
-            
-            map_global_unfiltered = o3d.io.read_point_cloud(f"{self.PACKAGE_PATH}/map_global.pcd")
-            self.map_global = filter_map_height(map_global_unfiltered, 0, 1.35)
-            global_downsample = 1
-
-        else:
-            self.map_global = self.map_global_ori.uniform_down_sample(every_k_points=int(self.DOWN_SAMPLING_FACTOR_GLOBAL)) # Original PointCloud (Global Map)
-            
-
-
-            
+        odom_inicio = self.leer_fila_excel(start_cloud - 1)
+        self.matriz_global = create_transform(*odom_inicio)
         
-        points2 = np.asarray(self.map_global.points)
-        print(f"Global Map size: {points2.shape} .")
-        map_global_show = filter_map_height(self.map_global_ori, 0, 1.35)
-        points2 = np.asarray(map_global_show.points)[::self.global_downsample_show] # Downsampling. Son demasiados puntos para RVIZ
-        pcd_global = self.point_cloud(points2, fixed_frame)
-        self.pcd_publisher_global.publish(pcd_global)
-        print(f"Global PointCloud with dimensions {points2.shape} has been published.")
-
-        # Ask once before starting if in auto mode.
-        LOCAL_CLOUDS_FOLDER = os.path.join(self.PACKAGE_PATH, "local_clouds")
-        if self.auto_mode:
-            
-            id_cloud, err_dis, unif_noise, algorithm_type, version_fitness, user_NPini, user_iter_max, MAX_CLOUD_ID = ask_params(local_clouds_folder=LOCAL_CLOUDS_FOLDER,online=self.online)
-            
-            
-        while True:
-
-            print(Color.BOLD + "\n------------------------------------" + Color.END)
-
-            # Ask every iteration if not in auto mode.
-            if not self.auto_mode:
-               
-               id_cloud, err_dis, unif_noise, algorithm_type, version_fitness, user_NPini, user_iter_max, MAX_CLOUD_ID  = ask_params(local_clouds_folder=LOCAL_CLOUDS_FOLDER,online=self.online)
-
-            map_local = None
-            real_groundtruth = None
-
-            if (self.online):
-                rclpy.spin_once(self) # Read once from subscribed topics
-                while (self.cloud_points == None or np.all(np.isinf(self.groundtruth))):
-                    print("Waiting for local scan...")
-                    rclpy.spin_once(self)
-
-                real_groundtruth = self.groundtruth
-
-                # Transform map_local datatype
-                points = read_points(self.cloud_points, skip_nans=True, field_names=("x", "y", "z"))
-                point_list = np.array(list(points))
-                map_local_unfiltered = o3d.geometry.PointCloud()
-                map_local_unfiltered.points = o3d.utility.Vector3dVector(point_list)
-                map_local = filter_map_height(map_local_unfiltered, 0, 1.35)
-                points_show = spatial_rotation(map_local.points, real_groundtruth)
-                pcd = self.point_cloud(points_show, fixed_frame)
-                self.pcd_publisher_real.publish(pcd)
-
-            else:
-                real_scan_ori = o3d.io.read_point_cloud(f"{LOCAL_CLOUDS_FOLDER}/cloud_{id_cloud}.ply")
-                map_local = real_scan_ori.uniform_down_sample(every_k_points=int(self.DOWN_SAMPLING_FACTOR)) # User Selected PointCloud (Local Map)
-                real_groundtruth = get_groundtruth_data(self.GROUNDTRUTH_FILE_PATH, id_cloud)              
-
-            print(f"Obtained local scan with dimensions {np.asarray(map_local.points).shape}\n")
-
-            # all_best_solutions is a list containing the best solution found each iteration of the algorithm.
-            # The last element of the list will be the best solution of them all.
-            all_best_solutions = generate_point_cloud(auto=self.auto_mode,
-                                          id_cloud = id_cloud,
-                                          err_dis = err_dis, 
-                                          unif_noise = unif_noise,
-                                          algorithm_type = algorithm_type,
-                                          version_fitness = version_fitness,
-                                          user_NPini = user_NPini,
-                                          user_iter_max = user_iter_max,
-                                          map_global = self.map_global,
-                                          real_scan = map_local,
-                                          groundtruth = real_groundtruth)
-
-
-            if self.animation:
-                count = 0
-                animation_not_finished = self.ask_restart("Start Animation? (y/n): ")
-                while animation_not_finished:
-                    for sol in all_best_solutions:
-                        count += 1
-
-                        points = spatial_rotation(map_local.points, sol)
-
-                        if points is None:
-                            print("Error generating point cloud.")
-                            break
-                        
-                        ds_1 = 1
-                        if not self.online:
-                            ds_1 = 1
-                        
-                        self.publish_point_clouds(points, fixed_frame, ds_1, silent=True)
-                        print(f"{Color.BOLD} Published solution {count}/{len(all_best_solutions)} {Color.END}")
-                        time.sleep(1)
-
-                    print(f"\n{Color.BOLD} Animation Finished {Color.END}")
-                    count = 0
-                    animation_not_finished = self.ask_restart("Restart Animation? (y/n): ")
-
-            else:
-                # Just show the best solution of them all. (last element of all_best_solutions)
-                points = spatial_rotation(map_local.points, all_best_solutions[-1])
-
-                if points is None:
-                    print("Error generating point cloud.")
-                    break
-                
-                # Por si se quiere hacer downsampling antes de publicar
-                ds_1 = 1
-                if not self.online:
-                    ds_1 = 1
-                
-                self.publish_point_clouds(points, 'base_footprint', ds_1)
-
-            # Reset variables obtained from simulation
-            self.cloud_points = None
-            self.groundtruth = np.full(6, np.inf)
-
-            if not self.auto_mode:
-                restart = self.ask_restart("Restart node? (y/n): ")
-                if not restart:
-                    self.destroy_node()  # Cierra el nodo antes de salir del bucle
-                    break
-            else:
-                if not self.online:
-                    # Loop for every cloud when in auto mode
-                    id_cloud += 1
-                    if id_cloud > MAX_CLOUD_ID:
-                        id_cloud = MIN_CLOUD_ID
-
-            print(Color.BOLD + "\n------------------------------------" + Color.END)
-
-    def ask_restart(self, text):
-        while True:
-            user_input = input(text)
-            if user_input == 'y':
-                return True
-            elif user_input == 'n':
-                return False
-            else:
-                print("Invalid answer. Please type 'y' for yes or 'n' for no.")
-
-
-    def publish_point_clouds(self, points, parent_frame, downsample_1, silent=False):
+        nube_1 = o3d.io.read_point_cloud(os.path.join(self.DATASET_FOLDER, f"cloud_{start_cloud-1}.ply"))
+        puntos_base = np.asarray(nube_1.points)
+        p_h_base = np.hstack((puntos_base, np.ones((puntos_base.shape[0], 1))))
+        p_g_base = (self.matriz_global @ p_h_base.T).T[:, :3]
+        self.mapa_completo.points = o3d.utility.Vector3dVector(p_g_base)
         
-        points = points[::downsample_1]
-        pcd = self.point_cloud(points, parent_frame)
-        self.pcd_publisher_local.publish(pcd)
-        if not silent:
-            print(f"Local PointCloud with dimensions {points.shape} has been published.")
+        print(f"\n{Color.YELLOW}🚀 MAPA INICIADO. Nube {start_cloud-1} fijada como ancla.{Color.END}")
 
-    def point_cloud(self, points, parent_frame):
-        """ Creates a point cloud message.
-        Args:
-            points: Nx3 array of xyz positions.
-            parent_frame: frame in which the point cloud is defined
-        Returns:
-            sensor_msgs/PointCloud2 message
+        for id_cloud in range(start_cloud, MAX_CLOUD_ID + 1):
+            print(f"\n{Color.DARKCYAN}================ PROCESANDO NUBE {id_cloud} CONTRA EL MAPA ================={Color.END}")
 
-        Code source:
-            https://gist.github.com/pgorczak/5c717baa44479fa064eb8d33ea4587e0
+            map_local_ori = o3d.io.read_point_cloud(os.path.join(self.DATASET_FOLDER, f"cloud_{id_cloud}.ply"))
+            
+            # --- MEJORA 1: DOWNSAMPLING DE LA NUBE LOCAL (Acelera el cálculo) ---
+            if self.VOXEL_SIZE_LOCAL > 0.0:
+                puntos_originales = len(map_local_ori.points)
+                map_local_ori = map_local_ori.voxel_down_sample(voxel_size=self.VOXEL_SIZE_LOCAL)
+                print(f"{Color.YELLOW}📉 Downsampling Local: Nube reducida de {puntos_originales} a {len(map_local_ori.points)} puntos.{Color.END}")
+            # --------------------------------------------------------------------
 
-        References:
-            http://docs.ros.org/melodic/api/sensor_msgs/html/msg/PointCloud2.html
-            http://docs.ros.org/melodic/api/sensor_msgs/html/msg/PointField.html
-            http://docs.ros.org/melodic/api/std_msgs/html/msg/Header.html
+            odom_act = self.leer_fila_excel(id_cloud)
+            if np.all(odom_act == 0):
+                print(f"{Color.RED}🚨 ERROR: Nube {id_cloud} no encontrada en odometria.csv{Color.END}")
 
-        """
-        # In a PointCloud2 message, the point cloud is stored as an byte 
-        # array. In order to unpack it, we also include some parameters 
-        # which desribes the size of each individual point.
-        ros_dtype = sensor_msgs.PointField.FLOAT32
-        dtype = np.float32
-        itemsize = np.dtype(dtype).itemsize # A 32-bit float takes 4 bytes.
+            odom_prev = self.leer_fila_excel(id_cloud-1)
+            desp = get_relative_jump(odom_prev, odom_act)
+            
+            # --- MEJORA 2: INYECCIÓN DE RUIDO A LA ODOMETRÍA ("PUTEARLO") ---
+            if self.MODO_HIBRIDO and self.INYECTAR_RUIDO:
+                # Simulamos un derrape de las ruedas inyectando un error extra de entre 5cm y 10cm en los ejes
+                ruido_x = np.random.choice([-1, 1]) * np.random.uniform(0.05, 0.10) 
+                ruido_y = np.random.choice([-1, 1]) * np.random.uniform(0.05, 0.10)
+                ruido_yaw = np.random.choice([-1, 1]) * np.random.uniform(0.02, 0.05)
+                
+                desp_original = copy.deepcopy(desp)
+                desp[0] += ruido_x
+                desp[1] += ruido_y
+                desp[5] += ruido_yaw
+                print(f"{Color.RED}⚠️ RUIDO INYECTADO: Las ruedas dicen que avanzó {desp[0]:.3f}m, pero lo real era {desp_original[0]:.3f}m{Color.END}")
+            # ----------------------------------------------------------------
+            
+            margen_tfg = np.array([0.40, 0.40, 0.0, 0.0, 0.0, 0.3])
+            print(f"{Color.CYAN}⚙️ Optimizando (Scan-to-Map) con margen {math.degrees(margen_tfg[5]):.2f}º...{Color.END}")
 
-        data = points.astype(dtype).tobytes() 
+            mapa_perspectiva_local = copy.deepcopy(self.mapa_completo)
+            mapa_perspectiva_local.transform(np.linalg.inv(self.matriz_global))
 
-        # The fields specify what the bytes represents. The first 4 bytes 
-        # represents the x-coordinate, the next 4 the y-coordinate, etc.
-        fields = [sensor_msgs.PointField(
-            name=n, offset=i*itemsize, datatype=ros_dtype, count=1)
-            for i, n in enumerate('xyz')]
+            # --- MEJORA 3: PASAMOS EL INTERRUPTOR use_odometry AL ALGORITMO ---
+            # Aquí es donde le dices la población que quieres usar en cada prueba cambiando user_NPini
+            all_best_solutions = generate_point_cloud(auto=True, id_cloud=id_cloud, err_dis=err_dis, 
+                                          unif_noise=unif_noise, algorithm_type=alg_type, version_fitness=fit_ver, 
+                                          user_NPini=200, 
+                                          user_iter_max=150, 
+                                          map_global=mapa_perspectiva_local, 
+                                          real_scan=map_local_ori, groundtruth=desp, 
+                                          mapmax=(desp+margen_tfg), mapmin=(desp-margen_tfg),
+                                          use_odometry=self.MODO_HIBRIDO) # <--- Variable añadida
+            # ------------------------------------------------------------------
 
-        # The PointCloud2 message also has a header which specifies which 
-        # coordinate frame it is represented in. 
-        header = std_msgs.Header(frame_id=parent_frame)
+            res_final = all_best_solutions[-1]
+            x_r, y_r, z_r, ro_r, pi_r, ya_r = res_final
+            
+            T_paso = create_transform(x_r, y_r, z_r, ro_r, pi_r, ya_r)
+            self.matriz_global = self.matriz_global @ T_paso
 
-        return sensor_msgs.PointCloud2(
-            header=header,
-            height=1, 
-            width=points.shape[0],
-            is_dense=False,
-            is_bigendian=False,
-            fields=fields,
-            point_step=(itemsize * 3), # Every point consists of three float32s.
-            row_step=(itemsize * 3 * points.shape[0]),
-            data=data
-        )
+            puntos_nube = np.asarray(map_local_ori.points)
+            puntos_homogeneos = np.hstack((puntos_nube, np.ones((puntos_nube.shape[0], 1))))
+            puntos_globales = (self.matriz_global @ puntos_homogeneos.T).T[:, :3]
+            nube_transformada = o3d.geometry.PointCloud()
+            nube_transformada.points = o3d.utility.Vector3dVector(puntos_globales)
+            
+            self.mapa_completo += nube_transformada
+            self.mapa_completo = self.mapa_completo.voxel_down_sample(voxel_size=0.05)
+            
+            o3d.io.write_point_cloud(os.path.join(self.DATASET_FOLDER, "mapa_generado_tfg.ply"), self.mapa_completo)
+            print(f"{Color.GREEN}✅ Nube {id_cloud} integrada firmemente en el mapa global.{Color.END}")
+
+    def leer_fila_excel(self, id_c):
+        try:
+            with open(self.GROUNDTRUTH_FILE_PATH, 'r') as file:
+                for row in csv.reader(file):
+                    try:
+                        if float(row[0]) == float(id_c):
+                            return np.array([float(row[1]), float(row[2]), float(row[3]), *quat_to_euler(float(row[4]), float(row[5]), float(row[6]), float(row[7]))])
+                    except: pass
+        except: pass
+        return np.zeros(6)
 
 def main(args=None):
-    config = configure_environment()
     rclpy.init(args=args)
-    pcd = PCD(config)
+    pcd = PCD(configure_environment())
     pcd.run()
     rclpy.shutdown()
-
 
 if __name__ == '__main__':
     main()

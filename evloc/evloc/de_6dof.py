@@ -1,6 +1,7 @@
 import numpy as np
 import open3d as o3d
 import time
+import math
 from evloc.common_functions import costfunction3d
 from evloc.common_functions import distance_pc_to_point
 from evloc.common_functions import spatial_rotation
@@ -16,51 +17,77 @@ class Population:
         self.Cost = cost
         
     def clone(self):
-        # Crea una nueva instancia de la clase Population con los mismos valores
         return Population(self.Position.copy(), self.Cost.copy())
 
-def de_6dof(scanCloud,mapCloud,mapmax,mapmin,err_dis,NPini,D,iter_max,F,CR,version_fitness):
-    """
-    Differential Evolution with Thresholding and Discarding 
-    Evolucion por mutación. En cada iteración, cada candidato (xi) genera uno
-    nuevo (x(i+1)). Este nuevo es una combinación parámetro a parámetro del candidato
-    antiguo y de una combinación tal que x(i+1)=F*(xc-xb)+xa, de otros 3 candidados de la poblacion xa,
-    xb y xc escogidos aleatoriamente.
-    El factor de mutación F determina como de "lejos" puede terminar cada nuevo parámetro en caso de mutar
-    La tasa de cruce CR define qué porcentaje de parámetros de x(i+1) son mutados o se heredan
-    de xi.
-    """
-    ##  Boundaries
-    higherBoundX = mapmax[0]  # X Translation in meters
-    lowerBoundX = mapmin[0]
-    higherBoundY = mapmax[1]  # Y Translation in meters
-    lowerBoundY = mapmin[1]
-    higherBoundZ = mapmax[2]  # Z Translation in meters
-    lowerBoundZ = mapmin[2]
-    higherAngle_rx = mapmax[3]  # Rotation around X
-    lowerAngle_rx = mapmin[3]
-    higherAngle_ry = mapmax[4]  # Rotation around Y
-    lowerAngle_ry = mapmin[4]
-    higherAngle_rz = mapmax[5]  # Rotation around Z
-    lowerAngle_rz = mapmin[5]
+# --- CAMBIO 1: Añadido el parámetro 'use_odometry' con valor por defecto False ---
+def de_6dof(scanCloud, mapCloud, mapmax, mapmin, err_dis, NPini, D, iter_max, F, CR, version_fitness, use_odometry=False):
+    
+    # =================================================================
+    # DEBUG PEDIDO POR EL PROFESOR: CONTEO DE PUNTOS
+    # =================================================================
+    print("\n--- ANÁLISIS DE CARGA COMPUTACIONAL ---")
+    print(f"Puntos del Escáner (Candidato): {len(scanCloud.points)}")
+    print(f"Puntos del Mapa (Global): {len(mapCloud.points)}")
+    print(f"Comparaciones estimadas por iteración: {len(scanCloud.points) * NPini} búsquedas.")
+    print("---------------------------------------\n")
+    
+    # ⚠️ Descomenta la siguiente línea si quieres ver visualmente las nubes antes de buscar
+    # o3d.visualization.draw_geometries([scanCloud, mapCloud], window_name="Nube Local vs Mapa Global")
+    # =================================================================
 
-    all_best_solutions = [] # Store best solution every iteration
 
-    # Problem Definition
+    # =================================================================
+    # EL INTERRUPTOR: SLAM PURO vs SLAM HÍBRIDO
+    # =================================================================
+    if use_odometry:
+        print(f"{Color.CYAN}⚙️ Ejecutando en MODO HÍBRIDO (Usando Odometría){Color.END}")
+        higherBoundX = mapmax[0]  
+        lowerBoundX = mapmin[0]
+        higherBoundY = mapmax[1]  
+        lowerBoundY = mapmin[1]
+        higherBoundZ = mapmax[2]  
+        lowerBoundZ = mapmin[2]
+        higherAngle_rx = mapmax[3]  
+        lowerAngle_rx = mapmin[3]
+        higherAngle_ry = mapmax[4]  
+        lowerAngle_ry = mapmin[4]
+        higherAngle_rz = mapmax[5]  
+        lowerAngle_rz = mapmin[5]
 
-    nVar = D            # Number of Decision Variables
-    VarSize = [1, nVar]   # Size of Decision Variables Matrix
-    minIt = 50  # Minimum number of iterations
+        # La "Partícula 0" nace exactamente donde la odometría dice que estamos
+        odom_target = (np.array(mapmax) + np.array(mapmin)) / 2.0 
+        
+    else:
+        print(f"{Color.PURPLE}Blind MODO A CIEGAS (SLAM Puro / Pure Scan Matching){Color.END}")
+        margen_x = 0.40
+        margen_y = 0.40
+        margen_theta = 0.60
+        
+        higherBoundX = margen_x
+        lowerBoundX = -margen_x
+        higherBoundY = margen_y
+        lowerBoundY = -margen_y
+        higherBoundZ = 0.01  
+        lowerBoundZ = -0.01
+        higherAngle_rx = 0.001
+        lowerAngle_rx = -0.001
+        higherAngle_ry = 0.001
+        lowerAngle_ry = -0.001
+        higherAngle_rz = margen_theta
+        lowerAngle_rz = -margen_theta
+
+        # La "Partícula 0" nace pensando que el robot está totalmente quieto (0,0,0)
+        odom_target = np.zeros(6) 
+    # =================================================================
+
+    all_best_solutions = [] 
+
+    nVar = D            
+    VarSize = [1, nVar]   
+    minIt = 50  
     stringcondition = "Max iterations reached"
-    # DE Parameters
-    # F - Mutation
-    # CR - Crossover rate
 
-    # Initialization
-    # Empty Candidate Structure
     empty_population = Population()
-
-    # Initialize Population
     population = [empty_population.clone() for _ in range(NPini)]
     rndmember = np.zeros(6)
     count = 0
@@ -68,7 +95,7 @@ def de_6dof(scanCloud,mapCloud,mapmax,mapmin,err_dis,NPini,D,iter_max,F,CR,versi
     vis2 = 1
     best_particle_cost = 100000000
     worst_particle_cost = 100000
-    count_bestfix = 0  # Counters for algorithm convergence
+    count_bestfix = 0  
     count_worstfix = 0
     count_avgfix = 0
     ind_reparto_error = 100000
@@ -76,246 +103,167 @@ def de_6dof(scanCloud,mapCloud,mapmax,mapmin,err_dis,NPini,D,iter_max,F,CR,versi
 
     ########## LOOP 1 ###########
     for current_iteration in range(NPini):
-        # Initialize Position
-        if current_iteration == 0:  # first population is a vector of zeros
-            population[current_iteration].Position = np.zeros(6)
+        if current_iteration == 0:  
+            population[current_iteration].Position = odom_target.copy()
         else:
             rndmember = np.zeros(6)
             for n in range(nVar):
-                if n == 0:  # Translation
-                    rndmember[n] = np.random.uniform(lowerBoundX, higherBoundX)
-                elif n == 1:
-                    rndmember[n] = np.random.uniform(lowerBoundY, higherBoundY)
-                elif n == 2:
-                    rndmember[n] = np.random.uniform(lowerBoundZ, higherBoundZ)
-                elif n == 3:  # Angle
-                    rndmember[n] = np.random.uniform(lowerAngle_rx, higherAngle_rx)
-                elif n == 4:
-                    rndmember[n] = np.random.uniform(lowerAngle_ry, higherAngle_ry)
-                elif n == 5:
-                    rndmember[n] = np.random.uniform(lowerAngle_rz, higherAngle_rz)
-
+                if n == 0: rndmember[n] = np.random.uniform(lowerBoundX, higherBoundX)
+                elif n == 1: rndmember[n] = np.random.uniform(lowerBoundY, higherBoundY)
+                elif n == 2: rndmember[n] = np.random.uniform(lowerBoundZ, higherBoundZ)
+                elif n == 3: rndmember[n] = np.random.uniform(lowerAngle_rx, higherAngle_rx)
+                elif n == 4: rndmember[n] = np.random.uniform(lowerAngle_ry, higherAngle_ry)
+                elif n == 5: rndmember[n] = np.random.uniform(lowerAngle_rz, higherAngle_rz)
             population[current_iteration].Position = rndmember
 
-        # Transform local cloud into each candidate's location
         cand_scan = o3d.geometry.PointCloud()
         cand_scan.points = o3d.utility.Vector3dVector(spatial_rotation(scanCloud.points, population[current_iteration].Position))
 
-        # Cortamos el mapa global a los limites de la nube local, para comparar con menos puntos(Puede salir nube vacía,
-        # en tal caso crear nube de ceros)
         aabb = cand_scan.get_axis_aligned_bounding_box()
-        cand_scan_min_bound = aabb.get_min_bound()
-        cand_scan_max_bound = aabb.get_max_bound()
-
-        cotout_region = o3d.geometry.AxisAlignedBoundingBox(min_bound=(cand_scan_min_bound), max_bound=(cand_scan_max_bound))
+        cotout_region = o3d.geometry.AxisAlignedBoundingBox(min_bound=aabb.get_min_bound(), max_bound=aabb.get_max_bound())
         Mapa_3D_cut = mapCloud.crop(cotout_region)
 
         if Mapa_3D_cut.is_empty():
             Mapa_3D_cut = o3d.geometry.PointCloud()
-            points_array = np.zeros((np.array(cand_scan.points).shape[0], 3))
-            Mapa_3D_cut.points = o3d.utility.Vector3dVector(points_array)
+            Mapa_3D_cut.points = o3d.utility.Vector3dVector(np.zeros((np.array(cand_scan.points).shape[0], 3)))
 
-        # Busqueda de NN para cada punto del scan colocado en la localización candidata
         kdtree = o3d.geometry.KDTreeFlann(Mapa_3D_cut)
-        Idx = np.empty((1, len(cand_scan.points)))
+        points_array = np.asarray(Mapa_3D_cut.points)
+        
+        valid_scan = []
+        valid_map = []
 
         for i in range(len(cand_scan.points)):
             query = np.array(cand_scan.points[i])
-            query = np.where(np.isnan(query), 0, query) # Replace NaN for 0
-            # Realizar la búsqueda de los vecinos más cercanos
-            knn_sol = kdtree.search_knn_vector_3d(query, 1)
-            index = knn_sol[1][0]
-            Idx[0][i] = index
+            query = np.where(np.isnan(query), 0, query) 
+            k, idx, d2 = kdtree.search_knn_vector_3d(query, 1)
+            
+            # --- FILTRO TRIMMED ICP: Si la distancia es < 0.25 (50cm), lo aceptamos ---
+            if d2[0] < 0.25:
+                valid_scan.append(cand_scan.points[i])
+                valid_map.append(points_array[idx[0]])
 
-        # Crear matriz de correspondencia
-        points_array = np.asarray(Mapa_3D_cut.points)
+        if len(valid_scan) > 20:
+            dist_NNmap = distance_pc_to_point(np.array(valid_map), population[current_iteration].Position)
+            dist_scancand = distance_pc_to_point(np.array(valid_scan), population[current_iteration].Position)
+            base_cost = costfunction3d(dist_scancand, dist_NNmap, version_fitness, err_dis)
+        else:
+            base_cost = 999999.0 # Penalización severa si no hay solapamiento
 
-        # Ensure 'Idx' contains integer values
-        Idx = Idx.astype(int)
+        population[current_iteration].Cost = base_cost
 
-        # Create matrix of correspondence
-        correspondence_mat = np.zeros((Idx.shape[1], 3))
-        for j in range(Idx.shape[1]):
-            correspondence_mat[j, :] = points_array[Idx[0, j], :]
+    ###### END LOOP 1 ######
 
-        # Calcular distancias euclídeas de cada punto del mapa y del scan al punto candidato
-        dist_NNmap = distance_pc_to_point(correspondence_mat, population[current_iteration].Position)
-        dist_scancand = distance_pc_to_point(cand_scan.points, population[current_iteration].Position)
-        
-        # Evaluar y asignar el error de las medidas (distancia euclídea o absoluta)
-        population[current_iteration].Cost = costfunction3d(dist_scancand, dist_NNmap, version_fitness, err_dis)
-
-    ###### END LOOP 1
-
-    #.#.#.#.#.#.#.#.#.#.#.#.#.#.#.#.#.#.#
-    # Bucle principal del algoritmo DE  #
-    #.#.#.#.#.#.#.#.#.#.#.#.#.#.#.#.#.#.#
     for it in range(iter_max):
         start_time = time.time()
         for pop_id in range(NP-1):
-            # Mutación y cruce
             a, b, c = np.random.randint(0, NP, size=3)
             newmember = Population()
             newmember.Position = [0,0,0,0,0,0]
 
-            for j in range(nVar): # that mutation only takes place a CR% of times, if not, that parameter remains from the original candidate xi
+            for j in range(nVar): 
                 if np.random.rand() < CR:
                     newmember.Position[j] = population[c].Position[j] + F * (population[a].Position[j] - population[b].Position[j])
                 else:
                     newmember.Position[j] = population[pop_id].Position[j]
 
-            # Apply limits for new member
-            newmember.Position[0] = max(newmember.Position[0], lowerBoundX)
-            newmember.Position[0] = min(newmember.Position[0], higherBoundX)
+            newmember.Position[0] = np.clip(newmember.Position[0], lowerBoundX, higherBoundX)
+            newmember.Position[1] = np.clip(newmember.Position[1], lowerBoundY, higherBoundY)
+            newmember.Position[2] = np.clip(newmember.Position[2], lowerBoundZ, higherBoundZ)
+            newmember.Position[3] = np.clip(newmember.Position[3], lowerAngle_rx, higherAngle_rx)
+            newmember.Position[4] = np.clip(newmember.Position[4], lowerAngle_ry, higherAngle_ry)
+            newmember.Position[5] = np.clip(newmember.Position[5], lowerAngle_rz, higherAngle_rz)
 
-            newmember.Position[1] = max(newmember.Position[1], lowerBoundY)
-            newmember.Position[1] = min(newmember.Position[1], higherBoundY)
-
-            newmember.Position[2] = max(newmember.Position[2], lowerBoundZ)
-            newmember.Position[2] = min(newmember.Position[2], higherBoundZ)
-
-            newmember.Position[3] = max(newmember.Position[3], lowerAngle_rx)
-            newmember.Position[3] = min(newmember.Position[3], higherAngle_rx)
-
-            newmember.Position[4] = max(newmember.Position[4], lowerAngle_ry)
-            newmember.Position[4] = min(newmember.Position[4], higherAngle_ry)
-
-            newmember.Position[5] = max(newmember.Position[5], lowerAngle_rz)
-            newmember.Position[5] = min(newmember.Position[5], higherAngle_rz)
-
-            # Evaluación nuevamente
             cand_scan = o3d.geometry.PointCloud()
             cand_scan.points = o3d.utility.Vector3dVector(spatial_rotation(scanCloud.points, newmember.Position))
 
-            # Cortamos el mapa a los límites de la nube (puede salir nube vacía, poner a 000)
             aabb = cand_scan.get_axis_aligned_bounding_box()
-            cand_scan_min_bound = aabb.get_min_bound()
-            cand_scan_max_bound = aabb.get_max_bound()
-
-            cotout_region = o3d.geometry.AxisAlignedBoundingBox(min_bound=(cand_scan_min_bound), max_bound=(cand_scan_max_bound))
+            cotout_region = o3d.geometry.AxisAlignedBoundingBox(min_bound=aabb.get_min_bound(), max_bound=aabb.get_max_bound())
             Mapa_3D_cut = mapCloud.crop(cotout_region)
 
             if Mapa_3D_cut.is_empty():
                 Mapa_3D_cut = o3d.geometry.PointCloud()
-                points_array = np.zeros((np.array(cand_scan.points).shape[0], 3))
-                Mapa_3D_cut.points = o3d.utility.Vector3dVector(points_array)
+                Mapa_3D_cut.points = o3d.utility.Vector3dVector(np.zeros((np.array(cand_scan.points).shape[0], 3)))
 
             kdtree = o3d.geometry.KDTreeFlann(Mapa_3D_cut)
-            Idx = np.empty((1, len(cand_scan.points)))
+            points_array = np.asarray(Mapa_3D_cut.points)
+            
+            valid_scan = []
+            valid_map = []
 
             for i in range(len(cand_scan.points)):
                 query = np.array(cand_scan.points[i])
-                query = np.where(np.isnan(query), 0, query) # Replace NaN for 0
-                # Realizar la búsqueda de los vecinos más cercanos
-                knn_sol = kdtree.search_knn_vector_3d(query, 1)
-                index = knn_sol[1][0]
-                Idx[0][i] = index
+                query = np.where(np.isnan(query), 0, query) 
+                k, idx, d2 = kdtree.search_knn_vector_3d(query, 1)
+                
+                # --- FILTRO TRIMMED ICP: Ignorar puntos sin correspondencia cercana ---
+                if d2[0] < 0.25:
+                    valid_scan.append(cand_scan.points[i])
+                    valid_map.append(points_array[idx[0]])
 
-            # Crear matriz de correspondencia
-            points_array = np.asarray(Mapa_3D_cut.points)
+            if len(valid_scan) > 20:
+                dist_NNmap = distance_pc_to_point(np.array(valid_map), newmember.Position)
+                dist_scancand = distance_pc_to_point(np.array(valid_scan), newmember.Position)
+                base_cost = costfunction3d(dist_scancand, dist_NNmap, version_fitness, err_dis)
+            else:
+                base_cost = 999999.0
 
-            # Ensure 'Idx' contains integer values
-            Idx = Idx.astype(int)
+            newmember.Cost = base_cost
 
-            # Create matrix of correspondence
-            correspondence_mat = np.zeros((Idx.shape[1], 3))
-            for j in range(Idx.shape[1]):
-                correspondence_mat[j, :] = points_array[Idx[0, j], :]
-
-            # Calcular distancias euclídeas de cada punto del mapa y del scan al punto candidato
-            dist_NNmap = distance_pc_to_point(correspondence_mat, newmember.Position)
-            dist_scancand = distance_pc_to_point(cand_scan.points, newmember.Position)
-
-            # Evaluar y asignar el error de las medidas (distancia euclídea o absoluta)
-            newmember.Cost = costfunction3d(dist_scancand, dist_NNmap, version_fitness, err_dis)
-
-            # Actualizar el miembro si mejora
-            if newmember.Cost < population[pop_id].Cost * 0.98:  # con umbral, el nuevo miembro debe mejorar más del 2% (evita efecto de ruido)
+            if newmember.Cost < population[pop_id].Cost * 0.98:  
                 population[pop_id] = newmember
 
-        # Discarding, substituting the worst candidates for some of the best
-        # members (speeds up convergence)
-
-        disc_range=0.9 # percentage to keep, in this case first 90%, last 10% will be replaced
-        repl_range=0.2 # percentage to repalce with, in this case first 20%
-
+        disc_range=0.9 
+        repl_range=0.2 
         population.sort(key=lambda x: x.Cost)
-
-        # Discard a portion of the population
         for i in range(NP, int(disc_range * NP), -1):
             population[i-1] = population[np.random.randint(0, repl_range*NP)]
-
-        # Sort the population based on 'Cost'
         population = sorted(population, key=lambda obj: obj.Cost)
 
         BestSol  = population[0]
         WorstSol = population[NP-1]
         sumcosts=0
 
-        # Calculate average cost
         for k in range(NP):
-            pop = population[k]
-            sumcosts += pop.Cost
+            sumcosts += population[k].Cost
         average_cost = sumcosts / NP
 
-        # Best and worst costs
         best_particle_cost_now = BestSol.Cost
         worst_particle_cost_now = WorstSol.Cost
 
         if count == 10:
-            print(f"\nIt: {it}, {Color.GREEN}Best: {round(best_particle_cost_now, 4)}{Color.END}, {Color.RED}Worst: {round(worst_particle_cost_now,4)}{Color.END}, {Color.YELLOW}Average: {round(average_cost,4)}{Color.END}, Best/measure: {round(best_particle_cost_now/NP,4)}, Worst/best: {round(worst_particle_cost_now/best_particle_cost_now,4)}, Avg/best: {round(average_cost/NP/best_particle_cost_now,4)} \n Position (x, y, z, alpha, beta, theta): [{round(BestSol.Position[0],4)}, {round(BestSol.Position[1],4)}, {round(BestSol.Position[2],4)}, {round(BestSol.Position[3],4)}, {round(BestSol.Position[4],4)}, {round(BestSol.Position[5],4)}]\n")
+            print(f"\nIt: {it}, {Color.GREEN}Best: {round(best_particle_cost_now, 4)}{Color.END}, {Color.RED}Worst: {round(worst_particle_cost_now,4)}{Color.END}, {Color.YELLOW}Average: {round(average_cost,4)}{Color.END}")
             count=0
         count=count+1
-        end_time = time.time()
         
-        #print(f'Count: {count} in {round(end_time-start_time, 2)} seconds') # DEBUG
-
-        # Convergence indicators
         if best_particle_cost_now < best_particle_cost:
-            count_worstfix = 0
-            count_avgfix = 0
-            count_bestfix = 0  # Yes, improvement from the previous iteration
+            count_worstfix = 0; count_avgfix = 0; count_bestfix = 0  
         else:
-            count_bestfix += 1  # No, increment the counter for non-improvement
+            count_bestfix += 1  
 
         best_particle_cost = best_particle_cost_now
 
-        # Check if the worst candidate has improved
         if worst_particle_cost_now > worst_particle_cost:
-            count_worstfix = 0
-            count_avgfix = 0
-            count_bestfix = 0  # Yes, improvement in the worst candidate
+            count_worstfix = 0; count_avgfix = 0; count_bestfix = 0  
         else:
-            count_worstfix += 1  # No, increment the counter for non-improvement
+            count_worstfix += 1  
 
         worst_particle_cost = worst_particle_cost_now
- 
         ind_reparto_error_aux = sumcosts / (NP*best_particle_cost)
 
-        if (ind_reparto_error_aux < ind_reparto_error): #Mejora la media?
-            count_avgfix=0
-            count_worstfix=0
-            count_bestfix=0  #si
+        if (ind_reparto_error_aux < ind_reparto_error): 
+            count_avgfix=0; count_worstfix=0; count_bestfix=0  
         else:
-            count_avgfix= count_avgfix+1 #no
+            count_avgfix += 1 
 
         ind_reparto_error = ind_reparto_error_aux
 
-        # Modificacion de parámetros del algoritmo en caliente
-        if (worst_particle_cost/best_particle_cost < 2.5) and (ind_reparto_error < 2): #Reducción del factor de mutación(lo lejos que se mueve un candidato) si converge un poco
+        if (worst_particle_cost/best_particle_cost < 2.5) and (ind_reparto_error < 2): 
             F = 0.7
-            if (vis1 == 1):
-                print(Color.CYAN + f'F reduced to 0.7' + Color.END)
-                vis1 = 0
-        if (worst_particle_cost/best_particle_cost < 1.5) and (ind_reparto_error < 1.25): # Reducción mayor si converge mucho, busqueda más cerca de las pos. actuales
+        if (worst_particle_cost/best_particle_cost < 1.5) and (ind_reparto_error < 1.25): 
             F = 0.3
             NP = int(NPini/5)
-            if (vis2 == 1):
-               print(Color.CYAN + f'F reduced to 0.3' + Color.END)
-               vis2 = 0
 
-        # Condiciones de convergencia (todos costes iguales||poblacion mejor,
-        # media y peor muy parecida || poblacion estancada || máximo de iteraciones)
         if all(obj.Cost == best_particle_cost_now for obj in population) or \
                 (worst_particle_cost / best_particle_cost < 1.15 and ind_reparto_error < 1.15 and it >= minIt) or \
                 (count_bestfix > 10 and count_worstfix > 10 and count_avgfix > 10 and it >= minIt):
@@ -324,23 +272,28 @@ def de_6dof(scanCloud,mapCloud,mapmax,mapmin,err_dis,NPini,D,iter_max,F,CR,versi
                 stringcondition = 'total convergence'
             elif worst_particle_cost / best_particle_cost < (1.15 + err_dis) and ind_reparto_error < (1.15 + err_dis):
                 stringcondition = 'normal convergence'
-            elif count_bestfix > 10 and count_worstfix > 10 and count_avgfix > 10:
+            else:
                 stringcondition = 'invariant convergence'
             
             print(f'\n{Color.CYAN}Population converged in: {it} iterations and condition: {stringcondition}{Color.END}')
             break
 
-
-        # Save current best solution
         all_best_solutions.append(BestSol.Position)
-    ########################################################
-    ########################################################
         
-    # BestMember = BestSol.Position
-
     rmse_array =  BestSol.Cost
-
     bestCost = BestSol.Cost
+
+    # =================================================================
+    # --- CHIVATO: ¿Ganó la odometría o ganó la evolución? ---
+    dist_a_particula_cero = np.linalg.norm(np.array(BestSol.Position) - np.array(odom_target))
+    
+    print("\n--- ANÁLISIS DEL RESULTADO ---")
+    if dist_a_particula_cero < 1e-4:
+        print(f"{Color.GREEN}¡LA ODOMETRÍA GANÓ! El láser confirma que las ruedas no patinaron (Partícula 0 intacta).{Color.END}")
+    else:
+        print(f"{Color.YELLOW}¡LA EVOLUCIÓN GANÓ! El láser corrigió la odometría desplazándose {round(dist_a_particula_cero, 4)} unidades de la Partícula 0.{Color.END}")
+    print("------------------------------\n")
+    # =================================================================
 
     pcAligned = o3d.geometry.PointCloud()
     pcAligned.points = o3d.utility.Vector3dVector(spatial_rotation(scanCloud.points, all_best_solutions[-1]))

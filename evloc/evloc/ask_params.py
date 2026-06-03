@@ -15,12 +15,7 @@ from evloc.evloc_constants import *
 def ask_params(local_clouds_folder=None,online=False):
     """
     Asks the user for the desired algorithm parameters and returns them.
-    local cloud ID,
-    laser error,
-    uniform error,
-    population size,
-    max iterations,
-    algortihm type and version fitness are set to default.
+    Modified for Scan Matching (N vs N-1)
     """
     
     id_cloud = None
@@ -29,21 +24,21 @@ def ask_params(local_clouds_folder=None,online=False):
         # Local Cloud
         num_clouds = len(os.listdir(local_clouds_folder))
 
-        print(Color.BOLD + f'\nAvailable scans [1-{num_clouds}]' + Color.END)
-        id_cloud = input(Color.BOLD + "Select cloud as real scan: " + Color.END)
+        print(Color.BOLD + f'\nAvailable scans [2-{num_clouds}]' + Color.END)
+        # MODIFICACION: Preguntamos por la nube actual. La base será la anterior automáticamente.
+        id_cloud = input(Color.BOLD + "Selecciona la Nube Actual (se comparará con la anterior): " + Color.END)
         if not id_cloud.strip():
-            id_cloud = 9
-            print(f'Default selected cloud: {id_cloud}')
+            id_cloud = 2 # Por defecto la 2, para comparar con la 1
+            print(f'Default selected cloud: {id_cloud} (Base: {id_cloud-1})')
         try:
-            if int(id_cloud) > num_clouds or int(id_cloud) < 1:
-                print(f'Error. Selected cloud ({id_cloud}) does not exist.') 
+            id_cloud = int(id_cloud)
+            if id_cloud > num_clouds or id_cloud < 2:
+                print(f'Error. Nube seleccionada ({id_cloud}) inválida. Debe ser >= 2.') 
                 exit(1)
 
         except ValueError as e:
             print(f'Error: Invalid Number. {e}')
             exit(1)
-
-            id_cloud = int(id_cloud)
 
     # Simulated laser error
     err_dis = input(Color.BOLD + "\nSensor noise (%): " + Color.END)
@@ -109,10 +104,10 @@ def ask_params(local_clouds_folder=None,online=False):
     ## ALGORITHM PARAMETERS SECTION ##
     print(Color.BOLD + f'\nAlgorithm parameters:\n' + Color.END)
 
-    # Population size
+    # Population size (MODIFICADO POR EL TUTOR A 200)
     user_NPini = input(Color.BOLD + "Population size: " + Color.END)
     if not user_NPini.strip():
-        user_NPini = 100
+        user_NPini = 200
         print(f'Default population is {user_NPini}')
     else:
         try:
@@ -126,10 +121,10 @@ def ask_params(local_clouds_folder=None,online=False):
             print(f'Error: Invalid Input. {e}')
             exit(1)
 
-    # Max Iterations
+    # Max Iterations (MODIFICADO POR EL TUTOR A 200)
     user_iter_max = input(Color.BOLD + "\nMax. iterations: " + Color.END)
     if not user_iter_max.strip():
-        user_iter_max = 500
+        user_iter_max = 200
         print(f'Default iteration max is {user_iter_max}')
     else:
         try:

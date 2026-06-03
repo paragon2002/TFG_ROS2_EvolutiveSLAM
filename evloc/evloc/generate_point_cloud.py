@@ -13,8 +13,8 @@ def generate_point_cloud(auto=False,
                          unif_noise = 0,
                          algorithm_type = 1,
                          version_fitness = 1,
-                         user_NPini = 100,
-                         user_iter_max = 500,
+                         user_NPini = 100, 
+                         user_iter_max = 120, 
                          D=6,
                          F=0.9,
                          CR=0.75,
@@ -29,16 +29,18 @@ def generate_point_cloud(auto=False,
                          sigma_final=0.001,
                          map_global=None,
                          real_scan=None,
-                         groundtruth=None
+                         groundtruth=None,
+                         mapmax=None, 
+                         mapmin=None,
+                         use_odometry=False # --- CAMBIO 1: Recibimos el interruptor del nodo ---
                          ):
     """
     Executes the evolutive localization algorithm.
     Returns the points that form the calculated point cloud.
     """
 
-    # Variables introduced via keyboard # (Only if not in auto mode)
     if (auto):
-        print("\n" + Color.DARKCYAN + f"Auto mode enabled. Cloud {id_cloud}/{len(os.listdir(LOCAL_CLOUDS_FOLDER))}" + Color.END)
+        print("\n" + Color.DARKCYAN + f"Auto mode enabled. Cloud {id_cloud}" + Color.END)
 
     print(Color.BOLD + "\nFINAL ALGORITHM PARAMETERS: " + Color.END)
 
@@ -49,7 +51,7 @@ def generate_point_cloud(auto=False,
     elif algorithm_type == 3:
         print(f"Algortihm type: 3 (IWO)")
 
-    print(f"Local Cloud: {id_cloud}")
+    print(f"Local Cloud: {id_cloud} (Base: {id_cloud-1})")
     print(f"Sensor Error: {err_dis}")
     print(f"Uniform Noise: {unif_noise}")
     print(f"NPini: {user_NPini}")
@@ -73,10 +75,25 @@ def generate_point_cloud(auto=False,
         print(f"sigma_initial: {sigma_initial}")
         print(f"sigma_final: {sigma_final}")
 
+    if mapmax is not None and mapmin is not None:
+        print(f"Search Bounds: min {mapmin}, max {mapmax}")
+        
+    # Imprimimos el estado del modo para asegurarnos de que llega bien
+    if use_odometry:
+        print(f"Modo: HÍBRIDO (Con odometría)")
+    else:
+        print(f"Modo: A CIEGAS (SLAM Puro)")
+
     algorithm = Algorithm(type=algorithm_type, NPini=user_NPini, iter_max=user_iter_max, D=D,F=F, CR=CR, w=w, wdamp=wdamp, c1=c1, c2=c2,
                           Smin=Smin, Smax=Smax, exponent=exponent, sigma_initial=sigma_initial, sigma_final=sigma_final)
 
-    solution = gl_6dof(map_global, real_scan, groundtruth, algorithm, version_fitness, err_dis, unif_noise)
+    try:
+        # --- CAMBIO 2: Pasamos el interruptor a gl_6dof ---
+        solution = gl_6dof(map_global, real_scan, groundtruth, algorithm, version_fitness, err_dis, unif_noise, mapmax=mapmax, mapmin=mapmin, use_odometry=use_odometry)
+    except TypeError:
+        # Fallback de seguridad
+        print(f"{Color.RED}Aviso: gl_6dof no está actualizado para recibir use_odometry.{Color.END}")
+        solution = gl_6dof(map_global, real_scan, groundtruth, algorithm, version_fitness, err_dis, unif_noise)
 
     save_error_data(id_cloud, algorithm_type, user_NPini, user_iter_max, D, F, CR, solution.time, solution.it, solution.all_poserrors, solution.all_orierrors,
                     w, wdamp, c1, c2, Smin, Smax, exponent, sigma_initial, sigma_final, solution.stop_condition)
