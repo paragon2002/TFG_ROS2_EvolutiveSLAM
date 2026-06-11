@@ -66,8 +66,8 @@ class PCD(Node):
         # =================================================================
         # PANEL DE CONTROL PARA LAS PRUEBAS DEL TFG
         # =================================================================
-        self.MODO_HIBRIDO = False       # False = SLAM Puro (a ciegas) | True = SLAM Híbrido (usa odometría)
-        self.INYECTAR_RUIDO = False    # True = Mete un error artificial a la odometría para probar su robustez
+        self.MODO_HIBRIDO = True       # False = SLAM Puro (a ciegas) | True = SLAM Híbrido (usa odometría)
+        self.INYECTAR_RUIDO = True    # True = Mete un error artificial a la odometría para probar su robustez
         self.VOXEL_SIZE_LOCAL = 0.10   # 0.10 = Reduce puntos cada 10cm. (Pon 0.0 si no quieres reducir la nube)
         # =================================================================
 
@@ -90,7 +90,7 @@ class PCD(Node):
 
             map_local_ori = o3d.io.read_point_cloud(os.path.join(self.DATASET_FOLDER, f"cloud_{id_cloud}.ply"))
             
-            # --- MEJORA 1: DOWNSAMPLING DE LA NUBE LOCAL (Acelera el cálculo) ---
+            # --- PUNTO 1: DOWNSAMPLING DE LA NUBE LOCAL (Acelera el cálculo) ---
             if self.VOXEL_SIZE_LOCAL > 0.0:
                 puntos_originales = len(map_local_ori.points)
                 map_local_ori = map_local_ori.voxel_down_sample(voxel_size=self.VOXEL_SIZE_LOCAL)
@@ -104,12 +104,12 @@ class PCD(Node):
             odom_prev = self.leer_fila_excel(id_cloud-1)
             desp = get_relative_jump(odom_prev, odom_act)
             
-            # --- MEJORA 2: INYECCIÓN DE RUIDO A LA ODOMETRÍA ("PUTEARLO") ---
+            # --- PUNTO 2 INYECCIÓN DE RUIDO A LA ODOMETRÍA ---
             if self.MODO_HIBRIDO and self.INYECTAR_RUIDO:
                 # Simulamos un derrape de las ruedas inyectando un error extra de entre 5cm y 10cm en los ejes
-                ruido_x = np.random.choice([-1, 1]) * np.random.uniform(0.05, 0.10) 
-                ruido_y = np.random.choice([-1, 1]) * np.random.uniform(0.05, 0.10)
-                ruido_yaw = np.random.choice([-1, 1]) * np.random.uniform(0.02, 0.05)
+                ruido_x = np.random.choice([-1, 1]) * np.random.uniform(0.75, 1.00) 
+                ruido_y = np.random.choice([-1, 1]) * np.random.uniform(0.75, 1.00)
+                ruido_yaw = np.random.choice([-1, 1]) * np.random.uniform(0.2, 0.6)
                 
                 desp_original = copy.deepcopy(desp)
                 desp[0] += ruido_x
@@ -118,13 +118,13 @@ class PCD(Node):
                 print(f"{Color.RED}⚠️ RUIDO INYECTADO: Las ruedas dicen que avanzó {desp[0]:.3f}m, pero lo real era {desp_original[0]:.3f}m{Color.END}")
             # ----------------------------------------------------------------
             
-            margen_tfg = np.array([0.40, 0.40, 0.0, 0.0, 0.0, 0.3])
+            margen_tfg = np.array([1.20, 1.20, 0.0, 0.0, 0.0, 0.8])
             print(f"{Color.CYAN}⚙️ Optimizando (Scan-to-Map) con margen {math.degrees(margen_tfg[5]):.2f}º...{Color.END}")
 
             mapa_perspectiva_local = copy.deepcopy(self.mapa_completo)
             mapa_perspectiva_local.transform(np.linalg.inv(self.matriz_global))
 
-            # --- MEJORA 3: PASAMOS EL INTERRUPTOR use_odometry AL ALGORITMO ---
+            # --- PUNTO 3: PASAMOS EL INTERRUPTOR use_odometry AL ALGORITMO ---
             # Aquí es donde le dices la población que quieres usar en cada prueba cambiando user_NPini
             all_best_solutions = generate_point_cloud(auto=True, id_cloud=id_cloud, err_dis=err_dis, 
                                           unif_noise=unif_noise, algorithm_type=alg_type, version_fitness=fit_ver, 
